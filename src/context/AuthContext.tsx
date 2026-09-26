@@ -1,15 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { User, Alias } from '../types.ts';
+import { User } from '../types.ts';
 import { api } from '../services/api.ts';
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  loginWithUsername: (username: string, password: string) => Promise<void>;
   loginWithOtp: (phone: string, otp: string, displayName?: string) => Promise<void>;
   loginWithPassword: (phone: string, password: string) => Promise<void>;
   logout: () => void;
   refreshUser: () => Promise<void>;
-  switchDemoUser: (phone: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -29,8 +29,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const userData = await api.getMe();
       setUser(userData);
-    } catch (err) {
-      console.warn('[AUTH] Token verification failed:', err);
+    } catch {
       api.setToken(null);
       setUser(null);
     } finally {
@@ -41,6 +40,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     refreshUser();
   }, [refreshUser]);
+
+  const loginWithUsername = async (username: string, password: string) => {
+    const res = await api.login(username, password);
+    setUser(res.user);
+  };
 
   const loginWithOtp = async (phone: string, otp: string, displayName?: string) => {
     const res = await api.verifyOtp(phone, otp, displayName);
@@ -57,39 +61,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
   };
 
-  const switchDemoUser = async (phone: string) => {
-    setLoading(true);
-    try {
-      // Prefer password fallback for seeded demo accounts (no OTP exposure required)
-      try {
-        await loginWithPassword(phone, 'Password123!');
-        return;
-      } catch {
-        // Fall through to OTP when password is not set
-      }
-      const otpRes = await api.requestOtp(phone, 'login');
-      if (!otpRes.demoCode) {
-        throw new Error('Demo OTP unavailable. Start the server in development/demo mode.');
-      }
-      await loginWithOtp(phone, otpRes.demoCode);
-    } catch (err: unknown) {
-      console.error('[AUTH] Demo switch error:', err);
-      throw err;
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <AuthContext.Provider
       value={{
         user,
         loading,
+        loginWithUsername,
         loginWithOtp,
         loginWithPassword,
         logout,
-        refreshUser,
-        switchDemoUser
+        refreshUser
       }}
     >
       {children}

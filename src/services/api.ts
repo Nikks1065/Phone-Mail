@@ -1,4 +1,4 @@
-import { User, Conversation, Message, Alias, SmsNotification, FolderType, Attachment } from '../types.ts';
+import { User, Conversation, Message, Alias, SmsNotification, FolderType, Attachment, UserSummary } from '../types.ts';
 
 const TOKEN_KEY = 'phonemail_auth_token';
 
@@ -62,15 +62,26 @@ class ApiService {
     });
   }
 
-  async registerAccount(
-    phone: string,
-    otp: string,
-    displayName?: string
-  ): Promise<{ success: boolean; message: string; emailAddress: string; phoneNumber: string }> {
+  async registerAccount(data: {
+    username: string;
+    password: string;
+    confirmPassword: string;
+    phone: string;
+    displayName?: string;
+  }): Promise<{ success: boolean; message: string; username: string; emailAddress: string; phoneNumber: string }> {
     return this.request('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ phone, otp, displayName })
+      body: JSON.stringify(data)
     });
+  }
+
+  async login(username: string, password: string): Promise<{ token: string; user: User }> {
+    const res = await this.request<{ token: string; user: User }>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password })
+    });
+    this.setToken(res.token);
+    return res;
   }
 
   async verifyOtp(phone: string, otp: string, displayName?: string): Promise<{ token: string; user: User; isNewUser: boolean }> {
@@ -89,6 +100,22 @@ class ApiService {
     });
     this.setToken(res.token);
     return res;
+  }
+
+  async searchUsers(query: string): Promise<UserSummary[]> {
+    const params = new URLSearchParams({ q: query });
+    return this.request<UserSummary[]>(`/api/users/search?${params.toString()}`);
+  }
+
+  async openConversationWithUser(username: string): Promise<{
+    conversation: Conversation;
+    messages: Message[];
+    recipient: UserSummary;
+  }> {
+    return this.request('/api/conversations/with-user', {
+      method: 'POST',
+      body: JSON.stringify({ username })
+    });
   }
 
   async setPassword(password: string): Promise<{ success: boolean }> {

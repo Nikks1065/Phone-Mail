@@ -10,9 +10,6 @@ import {
   MessageSquare,
   Settings,
   LogOut,
-  RotateCcw,
-  Sparkles,
-  UserCheck,
   Download
 } from 'lucide-react';
 
@@ -23,7 +20,7 @@ interface HeaderProps {
   onOpenInboundSimulator: () => void;
   onOpenIvrSimulator: () => void;
   onOpenSmsLogs: () => void;
-  onResetSeed: () => void;
+  onResetSeed?: () => void;
   unreadCount: number;
 }
 
@@ -34,10 +31,9 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenInboundSimulator,
   onOpenIvrSimulator,
   onOpenSmsLogs,
-  onResetSeed,
   unreadCount
 }) => {
-  const { user, logout, switchDemoUser } = useAuth();
+  const { user, logout } = useAuth();
 
   return (
     <header className="sticky top-0 z-40 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 px-4 py-2.5 flex items-center justify-between shadow-xs transition-colors">
@@ -57,9 +53,11 @@ export const Header: React.FC<HeaderProps> = ({
 
         {user && (
           <div className="hidden sm:flex items-center gap-1.5 pl-3 border-l border-slate-200 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-400">
-            <span className="font-semibold text-slate-800 dark:text-slate-200 tabular-nums">+{user.phoneNumber}</span>
+            <span className="font-semibold text-emerald-700 dark:text-emerald-300">@{user.username || user.displayName}</span>
             <span className="text-slate-400 dark:text-slate-600">·</span>
-            <span className="text-emerald-700 dark:text-emerald-300 font-mono bg-emerald-50 dark:bg-emerald-950/60 px-2 py-0.5 rounded text-[11px] border border-emerald-200 dark:border-emerald-800/60">
+            <span className="text-slate-800 dark:text-slate-200 tabular-nums">+{user.phoneNumber}</span>
+            <span className="text-slate-400 dark:text-slate-600">·</span>
+            <span className="text-slate-600 dark:text-slate-400 font-mono bg-slate-50 dark:bg-slate-800 px-2 py-0.5 rounded text-[11px] border border-slate-200 dark:border-slate-700">
               {user.emailAddress}
             </span>
           </div>
@@ -154,38 +152,12 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Global Theme Switcher Component */}
         <ThemeToggle />
 
-        {/* Quick Demo User Switcher */}
-        {user && (
-          <div className="hidden xl:flex items-center gap-1 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg p-0.5 text-xs">
-            <button
-              onClick={() => switchDemoUser('9876543210')}
-              className={`px-2 py-1 rounded font-medium transition-colors ${
-                user.phoneNumber === '9876543210'
-                  ? 'bg-emerald-600 text-white font-semibold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-            >
-              Nikhil (User 1)
-            </button>
-            <button
-              onClick={() => switchDemoUser('9123456789')}
-              className={`px-2 py-1 rounded font-medium transition-colors ${
-                user.phoneNumber === '9123456789'
-                  ? 'bg-emerald-600 text-white font-semibold'
-                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
-              }`}
-            >
-              Sarah (User 2)
-            </button>
-          </div>
-        )}
-
         {!user && (
           <a
             href="/register"
             className="hidden sm:inline-flex px-2.5 py-1 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/40 transition-colors"
           >
-            Register
+            Create Account
           </a>
         )}
 

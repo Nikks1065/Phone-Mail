@@ -1,5 +1,6 @@
 export interface User {
   id: string;
+  username?: string; // unique login handle, e.g. "alice"
   phone_number: string; // e.g. "9876543210"
   email_address: string; // e.g. "9876543210@phonemail.com"
   password_hash?: string;
@@ -46,6 +47,7 @@ export interface Conversation {
 
 export interface UserSummary {
   id: string;
+  username?: string;
   phone_number: string;
   email_address: string;
   display_name: string;

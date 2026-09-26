@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../services/api.ts';
-import { Conversation, Message, FolderType, Attachment } from '../../types.ts';
+import { Conversation, Message, FolderType, UserSummary } from '../../types.ts';
+import { UserSearch } from '../common/UserSearch.tsx';
 import {
   Inbox,
   Star,
@@ -221,6 +222,18 @@ export const DesktopApp: React.FC<DesktopAppProps> = ({ onOpenCompose, onOpenSet
     }
   };
 
+  const handleSelectUsername = async (selected: UserSummary) => {
+    if (!selected.username) return;
+    try {
+      const res = await api.openConversationWithUser(selected.username);
+      setSelectedConversation(res.conversation);
+      setConversationMessages(res.messages);
+      fetchConversations();
+    } catch (err: unknown) {
+      setReplyError(err instanceof Error ? err.message : 'Could not open conversation');
+    }
+  };
+
   return (
     <div className="flex h-[calc(100vh-53px)] bg-slate-50 dark:bg-slate-950 overflow-hidden font-sans text-slate-900 dark:text-slate-100">
       {/* 1. Left Sidebar Navigation (Gmail Style) */}
@@ -236,6 +249,11 @@ export const DesktopApp: React.FC<DesktopAppProps> = ({ onOpenCompose, onOpenSet
             </div>
             <span>Compose</span>
           </button>
+
+          <div className="space-y-1">
+            <div className="text-[11px] font-bold text-slate-500 uppercase tracking-wider px-1">New chat by username</div>
+            <UserSearch onSelectUser={handleSelectUsername} />
+          </div>
 
           {/* Folder Navigation Menu */}
           <nav className="space-y-0.5 text-xs font-medium">
@@ -391,7 +409,9 @@ export const DesktopApp: React.FC<DesktopAppProps> = ({ onOpenCompose, onOpenSet
                         hasUnread ? 'font-bold text-slate-900 dark:text-slate-100' : 'font-medium text-slate-800 dark:text-slate-200'
                       }`}
                     >
-                      {primaryContact?.display_name || conv.subject}
+                      {primaryContact?.username
+                        ? `@${primaryContact.username}`
+                        : primaryContact?.display_name || conv.subject}
                     </span>
                     {conv.type === 'group' && (
                       <span className="text-[10px] text-slate-400">

@@ -1,19 +1,16 @@
-import fs from 'fs';
-import path from 'path';
-import pg from 'pg';
 import {
   User,
   OtpRecord,
   Alias,
   Conversation,
   Message,
-  UserMessageState,
-  SmsNotification,
-  IvrLog,
   UserSummary,
-  Attachment
+  Attachment,
+  SmsNotification,
+  IvrLog
 } from './types.ts';
 import { hashOtp, verifyOtpHash } from './otpStore.ts';
+import { sqlPersist, emptySchema, type DatabaseSchema } from './sqlPersist.ts';
 
 /**
  * Normalize phone numbers for identity keys.
@@ -40,217 +37,102 @@ export function isValidPhoneNumber(phone: string): boolean {
   return digits.length >= 7 && digits.length <= 15;
 }
 
-interface DatabaseSchema {
-  users: User[];
-  otps: OtpRecord[];
-  aliases: Alias[];
-  conversations: Conversation[];
-  conversation_participants: { conversation_id: string; phone_number: string; user_id?: string }[];
-  messages: Message[];
-  user_message_states: UserMessageState[];
-  sms_notifications: SmsNotification[];
-  ivr_logs: IvrLog[];
+/** Username: 3–32 chars, letters/numbers/underscore, must start with a letter */
+export function isValidUsername(username: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9_]{2,31}$/.test(username);
+}
+
+export function normalizeUsername(username: string): string {
+  return username.trim().toLowerCase();
 }
 
 class RelationalDatabase {
-  private isPg = false;
-  private pgPool: pg.Pool | null = null;
-  private memoryData: DatabaseSchema = {
-    users: [],
-    otps: [],
-    aliases: [],
-    conversations: [],
-    conversation_participants: [],
-    messages: [],
-    user_message_states: [],
-    sms_notifications: [],
-    ivr_logs: []
-  };
-  private dataDir = path.resolve(process.cwd(), '.data');
-  private dataFile = path.resolve(process.cwd(), '.data', 'phonemail_db.json');
+  private memoryData: DatabaseSchema = emptySchema();
+  private readyPromise: Promise<void>;
+  private persistQueue: Promise<void> = Promise.resolve();
 
   constructor() {
-    this.init();
+    this.readyPromise = this.init();
   }
 
-  private init() {
-    // Check if DATABASE_URL is provided for PostgreSQL
-    if (process.env.DATABASE_URL && process.env.DATABASE_URL.startsWith('postgres')) {
-      try {
-        this.pgPool = new pg.Pool({
-          connectionString: process.env.DATABASE_URL,
-          connectionTimeoutMillis: 3000
-        });
-        this.isPg = true;
-        console.log('[DB] PostgreSQL URL detected at', process.env.DATABASE_URL.split('@')[1] || 'remote');
-        console.log('[DB] Runtime data uses the persistent JSON store (.data/phonemail_db.json). Postgres schema is provisioned for future migration.');
-        this.initLocalStore();
-        this.initPostgresSchema().catch(err => {
-          console.warn('[DB] PostgreSQL schema init skipped/failed:', err.message);
-          this.isPg = false;
-        });
-        return;
-      } catch (e: any) {
-        console.warn('[DB] Could not connect to PostgreSQL, falling back to local file store:', e.message);
-        this.isPg = false;
-      }
-    }
-
-    this.initLocalStore();
+  async ready(): Promise<void> {
+    await this.readyPromise;
   }
 
-  private initLocalStore() {
-    try {
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-      if (fs.existsSync(this.dataFile)) {
-        const raw = fs.readFileSync(this.dataFile, 'utf8');
-        this.memoryData = JSON.parse(raw);
-        console.log(`[DB] Loaded persistent data store: ${this.memoryData.users.length} users, ${this.memoryData.conversations.length} conversations, ${this.memoryData.messages.length} messages.`);
-      } else {
-        this.persistLocalStore();
-      }
-    } catch (e) {
-      console.error('[DB] Error loading local file store:', e);
-    }
+  getBackend(): string {
+    return sqlPersist.getMode();
+  }
+
+  private async init(): Promise<void> {
+    await sqlPersist.waitReady();
+    this.memoryData = await sqlPersist.loadAll();
   }
 
   private persistLocalStore() {
-    try {
-      if (!fs.existsSync(this.dataDir)) {
-        fs.mkdirSync(this.dataDir, { recursive: true });
-      }
-      fs.writeFileSync(this.dataFile, JSON.stringify(this.memoryData, null, 2), 'utf8');
-    } catch (e) {
-      console.error('[DB] Failed to persist data to file:', e);
-    }
+    // Serialize persists so concurrent writes don't interleave
+    this.persistQueue = this.persistQueue
+      .then(() => sqlPersist.saveAll(this.memoryData))
+      .catch((e) => {
+        console.error('[DB] Failed to persist to SQL store:', e);
+      });
   }
 
-  private async initPostgresSchema() {
-    if (!this.pgPool) return;
-    const client = await this.pgPool.connect();
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS users (
-          id VARCHAR(64) PRIMARY KEY,
-          phone_number VARCHAR(32) UNIQUE NOT NULL,
-          email_address VARCHAR(128) UNIQUE NOT NULL,
-          password_hash VARCHAR(256),
-          display_name VARCHAR(128) NOT NULL,
-          avatar_url TEXT,
-          language VARCHAR(16) DEFAULT 'en',
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_number);
-        CREATE INDEX IF NOT EXISTS idx_users_email ON users(email_address);
-
-        CREATE TABLE IF NOT EXISTS otps (
-          id VARCHAR(64) PRIMARY KEY,
-          phone_number VARCHAR(32) NOT NULL,
-          code VARCHAR(16) NOT NULL,
-          expires_at BIGINT NOT NULL,
-          attempts INT DEFAULT 0,
-          verified BOOLEAN DEFAULT FALSE
-        );
-        CREATE INDEX IF NOT EXISTS idx_otps_phone ON otps(phone_number);
-
-        CREATE TABLE IF NOT EXISTS aliases (
-          id VARCHAR(64) PRIMARY KEY,
-          user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE,
-          alias_email VARCHAR(128) UNIQUE NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          is_active BOOLEAN DEFAULT TRUE
-        );
-
-        CREATE TABLE IF NOT EXISTS conversations (
-          id VARCHAR(64) PRIMARY KEY,
-          type VARCHAR(16) NOT NULL DEFAULT 'direct',
-          subject VARCHAR(256) NOT NULL,
-          participant_phone_keys VARCHAR(256) NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_conv_keys ON conversations(participant_phone_keys);
-
-        CREATE TABLE IF NOT EXISTS conversation_participants (
-          conversation_id VARCHAR(64) REFERENCES conversations(id) ON DELETE CASCADE,
-          phone_number VARCHAR(32) NOT NULL,
-          user_id VARCHAR(64),
-          PRIMARY KEY (conversation_id, phone_number)
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-          id VARCHAR(64) PRIMARY KEY,
-          conversation_id VARCHAR(64) REFERENCES conversations(id) ON DELETE CASCADE,
-          sender_email VARCHAR(128) NOT NULL,
-          sender_phone VARCHAR(32),
-          sender_name VARCHAR(128) NOT NULL,
-          to_recipients JSONB NOT NULL DEFAULT '[]',
-          cc_recipients JSONB NOT NULL DEFAULT '[]',
-          subject VARCHAR(256) NOT NULL,
-          body_text TEXT NOT NULL,
-          body_html TEXT,
-          in_reply_to_id VARCHAR(64),
-          has_been_replied_to BOOLEAN DEFAULT FALSE,
-          is_draft BOOLEAN DEFAULT FALSE,
-          attachments JSONB NOT NULL DEFAULT '[]',
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id);
-        CREATE INDEX IF NOT EXISTS idx_messages_reply ON messages(in_reply_to_id);
-
-        CREATE TABLE IF NOT EXISTS user_message_states (
-          user_id VARCHAR(64) REFERENCES users(id) ON DELETE CASCADE,
-          message_id VARCHAR(64) REFERENCES messages(id) ON DELETE CASCADE,
-          is_read BOOLEAN DEFAULT FALSE,
-          is_favorite BOOLEAN DEFAULT FALSE,
-          is_spam BOOLEAN DEFAULT FALSE,
-          is_trash BOOLEAN DEFAULT FALSE,
-          is_sent BOOLEAN DEFAULT FALSE,
-          PRIMARY KEY (user_id, message_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS sms_notifications (
-          id VARCHAR(64) PRIMARY KEY,
-          recipient_phone VARCHAR(32) NOT NULL,
-          message_body TEXT NOT NULL,
-          sender_email VARCHAR(128) NOT NULL,
-          subject VARCHAR(256) NOT NULL,
-          status VARCHAR(32) NOT NULL,
-          provider VARCHAR(64) NOT NULL,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          error_message TEXT
-        );
-
-        CREATE TABLE IF NOT EXISTS ivr_logs (
-          id VARCHAR(64) PRIMARY KEY,
-          caller_phone VARCHAR(32) NOT NULL,
-          digit_pressed VARCHAR(8) NOT NULL,
-          result_account_created BOOLEAN DEFAULT FALSE,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-      `);
-      console.log('[DB] PostgreSQL schema verified successfully.');
-    } finally {
-      client.release();
-    }
+  async flush(): Promise<void> {
+    await this.persistQueue;
   }
 
   // --- Users Operations ---
   async getUserByPhone(phone: string): Promise<User | null> {
+    await this.ready();
     const normalized = normalizePhoneNumber(phone);
     return this.memoryData.users.find(u => u.phone_number === normalized) || null;
   }
 
   async getUserById(id: string): Promise<User | null> {
+    await this.ready();
     return this.memoryData.users.find(u => u.id === id) || null;
   }
 
+  async getUserByUsername(username: string): Promise<User | null> {
+    await this.ready();
+    const normalized = normalizeUsername(username);
+    return this.memoryData.users.find(u => u.username && normalizeUsername(u.username) === normalized) || null;
+  }
+
+  async searchUsersByUsername(query: string, excludeUserId?: string, limit = 10): Promise<UserSummary[]> {
+    await this.ready();
+    const q = normalizeUsername(query);
+    if (!q) return [];
+    return this.memoryData.users
+      .filter((u) => {
+        if (excludeUserId && u.id === excludeUserId) return false;
+        if (!u.username) return false;
+        return normalizeUsername(u.username).includes(q) || u.display_name.toLowerCase().includes(q);
+      })
+      .slice(0, limit)
+      .map((u) => ({
+        id: u.id,
+        username: u.username,
+        phone_number: u.phone_number,
+        email_address: u.email_address,
+        display_name: u.display_name,
+        avatar_url: u.avatar_url
+      }));
+  }
+
   async getUserByEmail(email: string): Promise<User | null> {
+    await this.ready();
     const lower = email.trim().toLowerCase();
-    // Direct match
+    // Username@domain style lookup
+    if (lower.includes('@')) {
+      const [local] = lower.split('@');
+      const byUsername = this.memoryData.users.find(u => u.username && normalizeUsername(u.username) === local);
+      if (byUsername) return byUsername;
+    } else {
+      const byUsername = await this.getUserByUsername(lower);
+      if (byUsername) return byUsername;
+    }
+    // Direct email match
     const user = this.memoryData.users.find(u => u.email_address.toLowerCase() === lower);
     if (user) return user;
     // Check aliases
@@ -263,23 +145,38 @@ class RelationalDatabase {
 
   async createUser(data: {
     phone_number: string;
+    username?: string;
     display_name?: string;
     password_hash?: string;
     avatar_url?: string;
     language?: string;
   }): Promise<User> {
+    await this.ready();
     const normalized = normalizePhoneNumber(data.phone_number);
     const existing = await this.getUserByPhone(normalized);
     if (existing) {
       throw new Error(`Account already exists for phone number ${normalized}`);
     }
 
+    let username: string | undefined;
+    if (data.username) {
+      if (!isValidUsername(data.username.trim())) {
+        throw new Error('Username must be 3–32 characters, start with a letter, and contain only letters, numbers, or underscores.');
+      }
+      username = normalizeUsername(data.username);
+      const taken = await this.getUserByUsername(username);
+      if (taken) {
+        throw new Error(`Username '${username}' is already taken.`);
+      }
+    }
+
     const newUser: User = {
       id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      username,
       phone_number: normalized,
       email_address: generatePhoneMailAddress(normalized),
       password_hash: data.password_hash,
-      display_name: data.display_name || `PhoneMail User (${normalized.slice(-4)})`,
+      display_name: data.display_name || username || `PhoneMail User (${normalized.slice(-4)})`,
       avatar_url: data.avatar_url || '',
       language: data.language || 'en',
       created_at: new Date().toISOString(),
@@ -288,6 +185,7 @@ class RelationalDatabase {
 
     this.memoryData.users.push(newUser);
     this.persistLocalStore();
+    await this.flush();
     return newUser;
   }
 
@@ -473,6 +371,7 @@ class RelationalDatabase {
       if (user) {
         participantSummaries.push({
           id: user.id,
+          username: user.username,
           phone_number: user.phone_number,
           email_address: user.email_address,
           display_name: user.display_name,
@@ -594,6 +493,7 @@ class RelationalDatabase {
         if (pUser) {
           participantSummaries.push({
             id: pUser.id,
+            username: pUser.username,
             phone_number: pUser.phone_number,
             email_address: pUser.email_address,
             display_name: pUser.display_name,
@@ -672,20 +572,25 @@ class RelationalDatabase {
     let targetConv: Conversation | null = null;
     const recipientPhonesToNotify: string[] = [];
 
-    // Extract all recipient phones/identities
+    // Extract all recipient phones/identities (supports username, phone, or email)
     const allRecipientPhones: string[] = [];
     for (const recipient of [...cleanTo, ...cleanCc]) {
-      // If email format, extract username part or lookup user
       let phone = '';
       if (recipient.includes('@')) {
         const user = await this.getUserByEmail(recipient);
         if (user) {
           phone = user.phone_number;
         } else {
-          // Parse potential phone number from 9876543210@phonemail.com
           const prefix = recipient.split('@')[0];
           phone = normalizePhoneNumber(prefix);
         }
+      } else if (/^[a-zA-Z]/.test(recipient)) {
+        // Username-based messaging
+        const user = await this.getUserByUsername(recipient);
+        if (!user) {
+          throw new Error(`User '@${recipient}' was not found.`);
+        }
+        phone = user.phone_number;
       } else {
         phone = normalizePhoneNumber(recipient);
       }

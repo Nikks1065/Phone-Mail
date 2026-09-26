@@ -1,5 +1,6 @@
 export interface User {
   id: string;
+  username: string;
   phoneNumber: string;
   emailAddress: string;
   displayName: string;
@@ -20,6 +21,7 @@ export interface Alias {
 
 export interface UserSummary {
   id: string;
+  username?: string;
   phone_number: string;
   email_address: string;
   display_name: string;

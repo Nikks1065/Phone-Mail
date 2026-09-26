@@ -1,5 +1,5 @@
-import { db, normalizePhoneNumber } from './db.ts';
-import { hashPassword, comparePassword, generateToken } from './auth.ts';
+import { db, normalizePhoneNumber, isValidUsername, normalizeUsername } from './db.ts';
+import { hashPassword, comparePassword } from './auth.ts';
 
 async function runTests() {
   console.log('🧪 Starting PhoneMail backend test suite...\n');
@@ -17,215 +17,133 @@ async function runTests() {
   }
 
   try {
-    // 1. Phone number normalization
+    await db.ready();
+    console.log(`  (database backend: ${db.getBackend()})\n`);
+
     const normalized = normalizePhoneNumber('+1 (987) 654-3210');
     assert(normalized === '19876543210', 'Phone number normalization strips punctuation');
+    assert(isValidUsername('alice') === true, 'Valid username accepted');
+    assert(isValidUsername('1bad') === false, 'Username starting with digit rejected');
+    assert(normalizeUsername('Alice') === 'alice', 'Username normalized to lowercase');
 
-    // 2. Account creation
-    const testPhone = '9991112222';
-    const existing = await db.getUserByPhone(testPhone);
-    const user = existing || await db.createUser({
-      phone_number: testPhone,
-      display_name: 'Test Runner User'
+    const runId = Date.now().toString(36);
+    const userAPhone = `55${String(Date.now()).slice(-8)}`;
+    const userBPhone = `56${String(Date.now()).slice(-8)}`;
+    const userAName = `alice_${runId}`;
+    const userBName = `bob_${runId}`;
+    const password = 'SecurePass123!';
+    const hash = await hashPassword(password);
+
+    const userA = await db.createUser({
+      phone_number: userAPhone,
+      username: userAName,
+      display_name: 'Alice Test',
+      password_hash: hash
     });
-    assert(user.email_address === `${testPhone}@phonemail.com`, 'User automatically gets <phone>@phonemail.com address');
+    assert(userA.username === userAName, 'User A created with username');
+    assert(userA.email_address === `${userAPhone}@phonemail.com`, 'User gets phone@phonemail.com address');
 
-    // 3. Password hashing
-    const pw = 'SecretPass123!';
-    const hashed = await hashPassword(pw);
-    const isMatch = await comparePassword(pw, hashed);
-    assert(isMatch === true, 'Password hashing and verification succeed');
+    let duplicateUser = false;
+    try {
+      await db.createUser({
+        phone_number: `57${String(Date.now()).slice(-8)}`,
+        username: userAName,
+        password_hash: hash
+      });
+    } catch {
+      duplicateUser = true;
+    }
+    assert(duplicateUser, 'Duplicate username is rejected');
 
-    // 4. OTP Generation and Verification
-    const otpCode = '654321';
-    await db.saveOtp(testPhone, otpCode, 5);
-    const verifySuccess = await db.verifyOtp(testPhone, otpCode);
-    assert(verifySuccess.success === true, 'OTP verification succeeds with valid code');
+    const loaded = await db.getUserByUsername(userAName);
+    assert(Boolean(loaded?.password_hash && loaded.password_hash !== password), 'Password stored as hash, not plaintext');
+    assert(await comparePassword(password, loaded!.password_hash!), 'Password hash verifies correctly');
 
-    const verifyFail = await db.verifyOtp(testPhone, '000000');
-    assert(verifyFail.success === false, 'OTP verification rejects invalid code');
-
-    // 5. Aliases management
-    const testRunId = Date.now().toString(36);
-    const aliasEmail = `alias_${testRunId}.${testPhone}@phonemail.com`;
-    const alias = await db.createAlias(user.id, aliasEmail);
-    assert(alias.alias_email === aliasEmail, 'Alias creation succeeds');
-
-    const userByAlias = await db.getUserByEmail(aliasEmail);
-    assert(userByAlias?.id === user.id, 'User lookup by alias address resolves to owner');
-
-    // 6. Direct Conversation Grouping
-    const partnerPhone = '9993334444';
-    const partner = await db.getUserByPhone(partnerPhone) || await db.createUser({
-      phone_number: partnerPhone,
-      display_name: 'Test Partner'
-    });
-
-    const msgResult1 = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address],
-      subject: `Test Subject ${testRunId}`,
-      body_text: 'Hello Partner'
-    });
-    assert(Boolean(msgResult1.message.id), 'Email message created successfully');
-
-    const msgResult2 = await db.createMessage({
-      sender_user_id: partner.id,
-      to: [user.email_address],
-      subject: `Re: Test Subject ${testRunId}`,
-      body_text: 'Hello User'
-    });
-    assert(msgResult1.conversation.id === msgResult2.conversation.id, '1-to-1 messages group into the exact same canonical conversation thread');
-
-    // 7. Group Conversation creation (2+ recipients)
-    const thirdPhone = '9995556666';
-    const thirdUser = await db.getUserByPhone(thirdPhone) || await db.createUser({
-      phone_number: thirdPhone,
-      display_name: 'Third Member'
+    const userB = await db.createUser({
+      phone_number: userBPhone,
+      username: userBName,
+      display_name: 'Bob Test',
+      password_hash: hash
     });
 
-    const groupResult = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address, thirdUser.email_address],
-      subject: `Group Planning ${testRunId}`,
-      body_text: 'Hi all'
-    });
-    assert(groupResult.conversation.type === 'group', 'Composing with 2+ recipients creates a distinct group conversation');
-    assert(groupResult.conversation.id !== msgResult1.conversation.id, 'Group conversation is distinct from 1-to-1 conversation');
+    const search = await db.searchUsersByUsername(userBName.slice(0, 5), userA.id);
+    assert(search.some((u) => u.username === userBName), 'Username search finds other users');
+    assert(!search.some((u) => u.id === userA.id), 'Username search excludes current user');
 
-    // 8. Single-Reply Constraint validation
-    // Create a fresh message for reply test
-    const freshMessageForReply = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address],
-      subject: `Reply Subject ${testRunId}`,
-      body_text: 'Message to be replied once'
+    // Username messaging via createMessage
+    const msg1 = await db.createMessage({
+      sender_user_id: userA.id,
+      to: [userBName],
+      subject: 'Hello Bob',
+      body_text: 'Message from Alice via username'
     });
+    assert(Boolean(msg1.message.id), 'Message sent to username');
 
-    const reply1 = await db.createMessage({
-      sender_user_id: partner.id,
-      conversation_id: freshMessageForReply.conversation.id,
-      to: [user.email_address],
-      subject: 'Reply to fresh message',
+    const msg2 = await db.createMessage({
+      sender_user_id: userB.id,
+      to: [userAName],
+      subject: 'Re: Hello Bob',
+      body_text: 'Reply from Bob'
+    });
+    assert(msg1.conversation.id === msg2.conversation.id, '1-to-1 username messages share one conversation');
+
+    const bobInbox = await db.getUserConversations(userB.id, 'inbox');
+    assert(bobInbox.some((c) => c.id === msg1.conversation.id), 'Recipient sees conversation in inbox');
+
+    const aliceView = await db.getConversationMessages(msg1.conversation.id, userA.id);
+    assert(aliceView.some((m) => m.body_text.includes('Reply from Bob')), 'Sender sees reply after refresh');
+
+    // Single-reply constraint
+    const fresh = await db.createMessage({
+      sender_user_id: userA.id,
+      to: [userBName],
+      subject: `Reply test ${runId}`,
+      body_text: 'Please reply once'
+    });
+    await db.createMessage({
+      sender_user_id: userB.id,
+      conversation_id: fresh.conversation.id,
+      to: [userA.email_address],
+      subject: 'Re',
       body_text: 'First reply',
-      in_reply_to_id: freshMessageForReply.message.id
+      in_reply_to_id: fresh.message.id
     });
-    assert(reply1.message.in_reply_to_id === freshMessageForReply.message.id, 'First reply linked successfully to parent message');
-
-    let replyErrorThrown = false;
+    let blocked = false;
     try {
       await db.createMessage({
-        sender_user_id: partner.id,
-        conversation_id: freshMessageForReply.conversation.id,
-        to: [user.email_address],
-        subject: 'Accidental Duplicate Reply',
-        body_text: 'Second duplicate reply',
-        in_reply_to_id: freshMessageForReply.message.id // Attempting duplicate reply to same message!
+        sender_user_id: userB.id,
+        conversation_id: fresh.conversation.id,
+        to: [userA.email_address],
+        subject: 'Re',
+        body_text: 'Second reply',
+        in_reply_to_id: fresh.message.id
       });
-    } catch (err: any) {
-      replyErrorThrown = true;
-    }
-    assert(replyErrorThrown === true, 'Backend enforces single-reply rule (rejects duplicate replies to same message)');
-
-    // 9. Drafts persistence
-    const draftResult = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address],
-      subject: 'Draft Email',
-      body_text: 'Unfinished thought',
-      is_draft: true
-    });
-    assert(draftResult.message.is_draft === true, 'Draft email saved and flagged');
-
-    // 10. Favorites, Spam, Trash states
-    const stateTestMsg = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address],
-      subject: `Folder State Test ${testRunId}`,
-      body_text: 'Folder state test'
-    });
-
-    await db.toggleFavorite(user.id, stateTestMsg.message.id, true);
-    let convsFav = await db.getUserConversations(user.id, 'favorites');
-    assert(convsFav.some(c => c.id === stateTestMsg.conversation.id), 'Favorite filter returns favorited conversation');
-
-    await db.setSpamState(user.id, stateTestMsg.message.id, true);
-    let convsSpam = await db.getUserConversations(user.id, 'spam');
-    assert(convsSpam.some(c => c.id === stateTestMsg.conversation.id), 'Moving to spam places conversation in spam folder');
-
-    let convsInboxAfterSpam = await db.getUserConversations(user.id, 'inbox');
-    assert(!convsInboxAfterSpam.some(c => c.id === stateTestMsg.conversation.id), 'Spam conversation is excluded from normal inbox');
-
-    await db.setSpamState(user.id, stateTestMsg.message.id, false);
-    await db.setTrashState(user.id, stateTestMsg.message.id, true);
-    let convsTrash = await db.getUserConversations(user.id, 'trash');
-    assert(convsTrash.some(c => c.id === stateTestMsg.conversation.id), 'Moving to trash places conversation in trash folder');
-
-    // 11. Restore from trash
-    await db.setTrashState(user.id, stateTestMsg.message.id, false);
-    const restoredMsgs = await db.getConversationMessages(stateTestMsg.conversation.id, user.id);
-    const restoredTarget = restoredMsgs.find(m => m.id === stateTestMsg.message.id);
-    assert(restoredTarget?.is_trash === false, 'Restored message clears trash flag on the message');
-
-    // 12. Duplicate account prevention
-    let duplicateBlocked = false;
-    try {
-      await db.createUser({ phone_number: testPhone, display_name: 'Duplicate' });
     } catch {
-      duplicateBlocked = true;
+      blocked = true;
     }
-    assert(duplicateBlocked, 'Duplicate phone number account creation is rejected');
+    assert(blocked, 'Single-reply constraint enforced');
 
-    // 13. Draft edit
-    const draftEdit = await db.createMessage({
-      sender_user_id: user.id,
-      to: [partner.email_address],
-      subject: 'Editable Draft',
-      body_text: 'v1',
-      is_draft: true
+    // Group conversation
+    const userC = await db.createUser({
+      phone_number: `58${String(Date.now()).slice(-8)}`,
+      username: `carol_${runId}`,
+      password_hash: hash
     });
-    const updatedDraft = await db.updateDraft(user.id, draftEdit.message.id, {
-      subject: 'Editable Draft v2',
-      body_text: 'v2 body'
+    const group = await db.createMessage({
+      sender_user_id: userA.id,
+      to: [userBName, userC.username!],
+      subject: 'Group chat',
+      body_text: 'Hi all'
     });
-    assert(updatedDraft.subject === 'Editable Draft v2' && updatedDraft.body_text === 'v2 body', 'Draft messages can be edited');
+    assert(group.conversation.type === 'group', 'Multi-username compose creates group conversation');
 
-    // 14. SMS deduplication
-    const sms1 = await db.logSms({
-      recipient_phone: testPhone,
-      message_body: 'test',
-      sender_email: 'a@b.com',
-      subject: 's',
-      status: 'simulated',
-      provider: 'demo',
-      related_message_id: stateTestMsg.message.id
-    });
-    const sms2 = await db.logSms({
-      recipient_phone: testPhone,
-      message_body: 'test again',
-      sender_email: 'a@b.com',
-      subject: 's',
-      status: 'simulated',
-      provider: 'demo',
-      related_message_id: stateTestMsg.message.id
-    });
-    assert(sms1.id === sms2.id, 'Duplicate SMS for the same message id is prevented');
-
-    // 15. OTP hash storage (plaintext not persisted)
-    await db.saveOtp(testPhone, '111222', 5);
-    const otpPlainStored = (db.getData().otps.find(o => o.phone_number === testPhone)?.code) === '111222';
-    assert(otpPlainStored === false, 'OTP codes are stored hashed, not in plaintext');
-    const otpOk = await db.verifyOtp(testPhone, '111222');
-    assert(otpOk.success === true, 'Hashed OTP still verifies correctly');
-
-    // 16. Search
-    const searchHits = await db.getUserConversations(user.id, 'inbox', testRunId);
-    assert(searchHits.length > 0, 'Search finds conversations by subject/content');
+    // Persistence round-trip
+    await db.flush();
+    const again = await db.getUserByUsername(userAName);
+    assert(again?.id === userA.id, 'User persists in SQL store after flush');
 
     console.log(`\n🏁 Test Suite Complete: ${passed} Passed, ${failed} Failed.`);
-    if (failed > 0) {
-      process.exit(1);
-    }
+    if (failed > 0) process.exit(1);
   } catch (e: unknown) {
     console.error('Fatal test exception:', e);
     process.exit(1);

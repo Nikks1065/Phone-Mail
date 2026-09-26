@@ -3,7 +3,13 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { db, normalizePhoneNumber, isValidPhoneNumber } from './server/db.ts';
+import {
+  db,
+  normalizePhoneNumber,
+  isValidPhoneNumber,
+  isValidUsername,
+  normalizeUsername
+} from './server/db.ts';
 import {
   authenticateToken,
   AuthenticatedRequest,
@@ -17,8 +23,24 @@ import { ivrService } from './server/ivr.ts';
 import { seedDatabase } from './server/seed.ts';
 import { checkRateLimit } from './server/rateLimit.ts';
 import { isDemoMode } from './server/otpStore.ts';
+import type { User as DbUser } from './server/types.ts';
 
 dotenv.config();
+
+function formatUserResponse(user: DbUser, aliases: unknown[] = []) {
+  return {
+    id: user.id,
+    username: user.username || '',
+    phoneNumber: user.phone_number,
+    emailAddress: user.email_address,
+    displayName: user.display_name,
+    avatarUrl: user.avatar_url,
+    language: user.language,
+    createdAt: user.created_at,
+    hasPassword: Boolean(user.password_hash),
+    aliases
+  };
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,12 +69,14 @@ function requireAuthOrAdmin(req: AuthenticatedRequest, res: Response, next: Next
 // --- API ROUTES ---
 
 // 1. Health Check
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (_req, res) => {
+  await db.ready();
   res.json({
     status: 'ok',
     service: 'PhoneMail API',
     timestamp: new Date().toISOString(),
-    smsProvider: smsService.isTwilioConfigured() ? 'twilio (live)' : 'simulated demo mode'
+    database: db.getBackend(),
+    smsProvider: smsService.isTwilioConfigured() ? 'twilio (live)' : 'simulated'
   });
 });
 
@@ -123,12 +147,24 @@ app.post('/api/auth/request-otp', async (req: Request, res: Response) => {
   }
 });
 
-// 2b. Auth: Registration-only portal (creates account; rejects duplicates)
+// 2b. Auth: Create Account (username + password + phone for PhoneMail identity)
 app.post('/api/auth/register', async (req: Request, res: Response) => {
   try {
-    const { phone, otp, displayName } = req.body;
-    if (!phone || !otp) {
-      return res.status(400).json({ error: 'Phone number and OTP code are required.' });
+    const { username, password, confirmPassword, phone, displayName } = req.body;
+
+    if (!username || !password || !phone) {
+      return res.status(400).json({ error: 'Username, password, and phone number are required.' });
+    }
+    if (typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    }
+    if (confirmPassword !== undefined && password !== confirmPassword) {
+      return res.status(400).json({ error: 'Password and Confirm Password do not match.' });
+    }
+    if (!isValidUsername(String(username).trim())) {
+      return res.status(400).json({
+        error: 'Username must be 3–32 characters, start with a letter, and use only letters, numbers, or underscores.'
+      });
     }
 
     const cleanPhone = normalizePhoneNumber(phone);
@@ -136,41 +172,46 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Please enter a valid phone number (7-15 digits).' });
     }
 
-    const existing = await db.getUserByPhone(cleanPhone);
-    if (existing) {
-      return res.status(409).json({
-        error: 'Account already exists for this phone number. Duplicate registration is not allowed.'
-      });
+    const rate = checkRateLimit(`register:${normalizeUsername(username)}`, 10, 15 * 60 * 1000);
+    if (!rate.allowed) {
+      return res.status(429).json({ error: `Too many registration attempts. Try again in ${rate.retryAfterSeconds}s.` });
     }
 
-    const verification = await db.verifyOtp(cleanPhone, otp);
-    if (!verification.success) {
-      return res.status(400).json({ error: verification.message || 'OTP verification failed.' });
+    if (await db.getUserByUsername(username)) {
+      return res.status(409).json({ error: 'That username is already taken.' });
+    }
+    if (await db.getUserByPhone(cleanPhone)) {
+      return res.status(409).json({ error: 'An account already exists for this phone number.' });
     }
 
+    const password_hash = await hashPassword(password);
     const user = await db.createUser({
       phone_number: cleanPhone,
-      display_name: displayName || `PhoneMail User (+${cleanPhone})`
+      username: String(username).trim(),
+      display_name: displayName || String(username).trim(),
+      password_hash
     });
 
     await db.receiveInboundEmail({
       sender_email: 'welcome@phonemail.com',
       sender_name: 'PhoneMail System',
       to_email: user.email_address,
-      subject: 'Welcome to PhoneMail — Your phone number is your email!',
-      body_text: `Hello!\n\nWelcome to PhoneMail. Your phone number has been linked to your official email identity: ${user.email_address}.\n\nYou can send and receive emails right from this inbox.`
+      subject: 'Welcome to PhoneMail',
+      body_text: `Welcome @${user.username}!\n\nYour PhoneMail address is ${user.email_address}.\nYou can message other users by their username.`
     });
 
     res.status(201).json({
       success: true,
-      message: 'Account created successfully. You can now log in.',
+      message: 'Account created successfully. You can now log in with your username and password.',
+      username: user.username,
       emailAddress: user.email_address,
       phoneNumber: user.phone_number
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Failed to register account.';
     console.error('[API] register error:', err);
-    res.status(500).json({ error: message });
+    const status = message.includes('taken') || message.includes('already') ? 409 : 500;
+    res.status(status).json({ error: message });
   }
 });
 
@@ -218,63 +259,136 @@ app.post('/api/auth/verify-otp', async (req: Request, res: Response) => {
       success: true,
       token,
       isNewUser,
-      user: {
-        id: user.id,
-        phoneNumber: user.phone_number,
-        emailAddress: user.email_address,
-        displayName: user.display_name,
-        avatarUrl: user.avatar_url,
-        language: user.language,
-        createdAt: user.created_at,
-        aliases
-      }
+      user: formatUserResponse(user, aliases)
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to verify OTP.';
     console.error('[API] verify-otp error:', err);
-    res.status(500).json({ error: err.message || 'Failed to verify OTP.' });
+    res.status(500).json({ error: message });
   }
 });
 
-// 4. Auth: Password Login Fallback
+// 4. Auth: Username + Password Login (primary)
+app.post('/api/auth/login', async (req: Request, res: Response) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const rate = checkRateLimit(`login:${normalizeUsername(username)}`, 20, 15 * 60 * 1000);
+    if (!rate.allowed) {
+      return res.status(429).json({ error: `Too many login attempts. Try again in ${rate.retryAfterSeconds}s.` });
+    }
+
+    const user = await db.getUserByUsername(username);
+    if (!user || !user.password_hash) {
+      return res.status(401).json({ error: 'Incorrect username or password.' });
+    }
+
+    const matches = await comparePassword(password, user.password_hash);
+    if (!matches) {
+      return res.status(401).json({ error: 'Incorrect username or password.' });
+    }
+
+    const token = generateToken(user);
+    const aliases = await db.getAliasesByUser(user.id);
+    res.json({ success: true, token, user: formatUserResponse(user, aliases) });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to log in.';
+    console.error('[API] login error:', err);
+    res.status(500).json({ error: message });
+  }
+});
+
+// 4b. Legacy phone + password login (kept for compatibility)
 app.post('/api/auth/password-login', async (req: Request, res: Response) => {
   try {
-    const { phone, password } = req.body;
+    const { phone, password, username } = req.body;
+    if (username && password) {
+      // Allow clients to post username here as well
+      const user = await db.getUserByUsername(username);
+      if (!user?.password_hash || !(await comparePassword(password, user.password_hash))) {
+        return res.status(401).json({ error: 'Incorrect username or password.' });
+      }
+      const aliases = await db.getAliasesByUser(user.id);
+      return res.json({ success: true, token: generateToken(user), user: formatUserResponse(user, aliases) });
+    }
+
     if (!phone || !password) {
-      return res.status(400).json({ error: 'Phone number and password are required.' });
+      return res.status(400).json({ error: 'Username/password or phone/password are required.' });
     }
 
     const cleanPhone = normalizePhoneNumber(phone);
     const user = await db.getUserByPhone(cleanPhone);
 
     if (!user || !user.password_hash) {
-      return res.status(401).json({ error: 'Account not found or password not set. Please use OTP login.' });
+      return res.status(401).json({ error: 'Incorrect credentials.' });
     }
 
     const matches = await comparePassword(password, user.password_hash);
     if (!matches) {
-      return res.status(401).json({ error: 'Invalid password. Please try again or use OTP.' });
+      return res.status(401).json({ error: 'Incorrect credentials.' });
     }
 
     const token = generateToken(user);
     const aliases = await db.getAliasesByUser(user.id);
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        phoneNumber: user.phone_number,
-        emailAddress: user.email_address,
-        displayName: user.display_name,
-        avatarUrl: user.avatar_url,
-        language: user.language,
-        createdAt: user.created_at,
-        aliases
-      }
-    });
-  } catch (err: any) {
+    res.json({ success: true, token, user: formatUserResponse(user, aliases) });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to authenticate with password.';
     console.error('[API] password-login error:', err);
-    res.status(500).json({ error: err.message || 'Failed to authenticate with password.' });
+    res.status(500).json({ error: message });
+  }
+});
+
+// 4c. Username search for messaging
+app.get('/api/users/search', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 1) {
+      return res.json([]);
+    }
+    const results = await db.searchUsersByUsername(q, req.user!.id, 12);
+    res.json(results);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Search failed.';
+    res.status(500).json({ error: message });
+  }
+});
+
+// 4d. Open or create a direct conversation with a username
+app.post('/api/conversations/with-user', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { username } = req.body;
+    if (!username) {
+      return res.status(400).json({ error: 'Username is required.' });
+    }
+    const target = await db.getUserByUsername(username);
+    if (!target) {
+      return res.status(404).json({ error: `User '@${username}' was not found.` });
+    }
+    if (target.id === req.user!.id) {
+      return res.status(400).json({ error: 'You cannot start a conversation with yourself.' });
+    }
+
+    const conv = await db.getOrCreateDirectConversation(
+      req.user!.phone_number,
+      target.phone_number,
+      `@${target.username}`
+    );
+    const conversation = await db.getConversationById(conv.id, req.user!.id);
+    const messages = await db.getConversationMessages(conv.id, req.user!.id);
+    res.json({ conversation, messages, recipient: {
+      id: target.id,
+      username: target.username,
+      display_name: target.display_name,
+      email_address: target.email_address,
+      phone_number: target.phone_number,
+      avatar_url: target.avatar_url
+    }});
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to open conversation.';
+    res.status(400).json({ error: message });
   }
 });
 
@@ -300,19 +414,10 @@ app.get('/api/auth/me', authenticateToken, async (req: AuthenticatedRequest, res
   try {
     const user = req.user!;
     const aliases = await db.getAliasesByUser(user.id);
-    res.json({
-      id: user.id,
-      phoneNumber: user.phone_number,
-      emailAddress: user.email_address,
-      displayName: user.display_name,
-      avatarUrl: user.avatar_url,
-      language: user.language,
-      createdAt: user.created_at,
-      hasPassword: Boolean(user.password_hash),
-      aliases
-    });
-  } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to fetch user profile.' });
+    res.json(formatUserResponse(user, aliases));
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Failed to fetch user profile.';
+    res.status(500).json({ error: message });
   }
 });
 
@@ -775,7 +880,8 @@ app.post('/api/attachments/upload', authenticateToken, async (req: Authenticated
 
 // --- SERVER INITIALIZATION & VITE MIDDLEWARE MOUNTING ---
 async function startServer() {
-  // Initialize initial seed data
+  await db.ready();
+  console.log(`[DB] Backend ready: ${db.getBackend()}`);
   await seedDatabase().catch(err => console.error('[SEED] Seed error:', err));
 
   if (!isProd) {

@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext.tsx';
 import { api } from '../../services/api.ts';
-import { Conversation, Message, FolderType, Attachment } from '../../types.ts';
+import { Conversation, Message, FolderType, UserSummary } from '../../types.ts';
+import { UserSearch } from '../common/UserSearch.tsx';
 import {
   Search,
   Plus,
@@ -96,15 +97,18 @@ export const MobileApp: React.FC<MobileAppProps> = ({ onOpenCompose, onOpenSetti
     }
   };
 
-  /** Chat-style compose: search a phone number and open/create that 1:1 conversation */
-  const handlePhoneSearchCompose = async () => {
-    const digits = searchQuery.replace(/\D/g, '');
-    if (digits.length < 7 || !user) return;
+  const handleSelectUsername = async (selected: UserSummary) => {
+    if (!selected.username) return;
     setPhoneSearchBusy(true);
     setReplyError('');
     try {
-      const email = `${digits}@phonemail.com`;
-      onOpenCompose(undefined, [email], false);
+      const res = await api.openConversationWithUser(selected.username);
+      setSelectedConversation(res.conversation);
+      setConversationMessages(res.messages);
+      setChatSubject(res.conversation.subject || `@${selected.username}`);
+      loadConversations();
+    } catch (err: unknown) {
+      setReplyError(err instanceof Error ? err.message : 'Could not open conversation');
     } finally {
       setPhoneSearchBusy(false);
     }
@@ -535,31 +539,26 @@ export const MobileApp: React.FC<MobileAppProps> = ({ onOpenCompose, onOpenSetti
               </div>
             </div>
 
-            {/* Full-width Search Bar */}
-            <div className="relative flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search or enter phone to chat..."
-                  aria-label="Search conversations or phone number"
-                  className="w-full pl-9 pr-4 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-400 focus:bg-slate-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
-                />
-              </div>
-              {searchQuery.replace(/\D/g, '').length >= 7 && (
-                <button
-                  type="button"
-                  onClick={handlePhoneSearchCompose}
-                  disabled={phoneSearchBusy}
-                  className="shrink-0 px-2.5 py-1.5 bg-emerald-600 text-white text-[10px] font-bold rounded-lg"
-                  title="Compose to this phone number"
-                >
-                  Chat
-                </button>
-              )}
+            {/* Username search to start a chat */}
+            <div className="mb-2">
+              <UserSearch onSelectUser={handleSelectUsername} placeholder="Message a username…" />
             </div>
+
+            {/* Conversation filter search */}
+            <div className="relative">
+              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Filter conversations…"
+                aria-label="Filter conversations"
+                className="w-full pl-9 pr-4 py-1.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white placeholder-slate-400 focus:bg-slate-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
+              />
+            </div>
+            {phoneSearchBusy && (
+              <div className="text-[10px] text-emerald-300 mt-1">Opening conversation…</div>
+            )}
           </div>
 
           {/* Filter Segmented Controls (All / Unread / Attachments / Favorites) */}
@@ -649,7 +648,9 @@ export const MobileApp: React.FC<MobileAppProps> = ({ onOpenCompose, onOpenSetti
                             hasUnread ? 'font-bold text-slate-900 dark:text-slate-100' : 'font-semibold text-slate-800 dark:text-slate-200'
                           }`}
                         >
-                          {primaryContact?.display_name || conv.subject || 'Unknown Contact'}
+                          {primaryContact?.username
+                            ? `@${primaryContact.username}`
+                            : primaryContact?.display_name || conv.subject || 'Unknown Contact'}
                         </span>
                         <span className="text-[10px] text-slate-400 dark:text-slate-500 tabular-nums shrink-0 ml-2">
                           {latest

@@ -30,7 +30,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      DEMO_MODE: "true"
+      DEMO_MODE: "false"
+      SEED_DEMO_DATA: "false"
       DATABASE_URL: postgres://phonemail:phonemail_secret@postgres:5432/phonemail_db
       JWT_SECRET: phonemail_super_secret_buildathon_key_2026
       ADMIN_SECRET: phonemail_admin_demo_secret
