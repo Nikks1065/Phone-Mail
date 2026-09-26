@@ -43,4 +43,5 @@
 - [x] `npm run dev` — started for interactive verification
 - [ ] `docker compose up -d` — **Docker daemon not available in this environment**; Dockerfile/compose updated and documented for local/CI machines
 - [x] Backend flows covered by automated suite (auth, conversations, reply constraint, drafts, SMS dedupe, OTP hashing, search, folders)
+- [x] UI smoke test — login (Nikhil demo), desktop inbox render, `/register` phone→OTP Next flow (no UI bugs found)
 - [ ] Live Twilio SMS / Voice — **not tested** (requires paid/trial credentials and verified numbers)
