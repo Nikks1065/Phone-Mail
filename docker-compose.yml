@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: phonemail_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: phonemail
+      POSTGRES_PASSWORD: phonemail_secret
+      POSTGRES_DB: phonemail_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phonemail -d phonemail_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: phonemail_app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DEMO_MODE: "true"
+      DATABASE_URL: postgres://phonemail:phonemail_secret@postgres:5432/phonemail_db
+      JWT_SECRET: phonemail_super_secret_buildathon_key_2026
+      ADMIN_SECRET: phonemail_admin_demo_secret
+      SMS_PROVIDER: simulated
+      TWILIO_ACCOUNT_SID: ""
+      TWILIO_AUTH_TOKEN: ""
+      TWILIO_PHONE_NUMBER: ""
+      EMAIL_DOMAIN: phonemail.com
+      APP_URL: http://localhost:3000
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - app_data:/app/.data
+
+volumes:
+  postgres_data:
+  app_data:
