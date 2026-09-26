@@ -34,6 +34,26 @@ Open [http://localhost:3000](http://localhost:3000).
 
 Data persists in the `app_data` volume (JSON store under `/app/.data`). Postgres is started for schema provisioning / future migration; the running app uses the persistent JSON relational store for mail data.
 
+### Deploy on Render (recommended public hosting)
+
+This repo includes a Render Blueprint (`render.yaml`).
+
+1. Push this code to GitHub (e.g. `Nikks1065/Phone-Mail` on branch `main`).
+2. Open [Render Blueprints](https://dashboard.render.com/blueprints) → **New Blueprint Instance**.
+3. Connect the GitHub repository and select the branch with `render.yaml`.
+4. Apply the blueprint. Render will create a free Node web service with:
+   - Build: `npm install --legacy-peer-deps && npm run build`
+   - Start: `npm start`
+   - Health check: `/api/health`
+5. After deploy, open `https://<your-service>.onrender.com`.
+6. Optional: in the Render dashboard → Environment, set Twilio keys and/or `DEMO_MODE=false`.
+
+**Notes**
+- Free Render instances sleep after idle traffic; the first request may take ~30–60s.
+- Without a paid disk, `.data/` is ephemeral (seed regenerates on fresh instances).
+- `APP_URL` is auto-filled from Render’s `RENDER_EXTERNAL_URL` when unset.
+- Manual alternative (no Blueprint): New → Web Service → connect repo → same build/start commands → add env vars from `.env.example`.
+
 ---
 
 ## Features

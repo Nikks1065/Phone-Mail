@@ -1,0 +1,37 @@
+# PhoneMail — Render Blueprint
+# Deploy: https://dashboard.render.com/blueprints → New Blueprint Instance
+# Connect the GitHub repo that contains this file (e.g. Nikks1065/Phone-Mail).
+
+services:
+  - type: web
+    name: phonemail
+    runtime: node
+    plan: free
+    region: oregon
+    rootDir: .
+    buildCommand: npm install --legacy-peer-deps && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Keep true for buildathon evaluators (OTP demoCode in API). Set false for real users.
+      - key: DEMO_MODE
+        value: "true"
+      - key: EMAIL_DOMAIN
+        value: phonemail.com
+      - key: SMS_PROVIDER
+        value: simulated
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_SECRET
+        generateValue: true
+      # Optional Twilio (leave empty for simulated SMS)
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      # Do NOT set DATABASE_URL on free tier unless you attach Render Postgres.
+      # PhoneMail persists to .data/phonemail_db.json (ephemeral on free instances).

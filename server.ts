@@ -788,17 +788,31 @@ async function startServer() {
     app.use(vite.middlewares);
     console.log('[SERVER] Vite development middleware mounted.');
   } else {
-    // Production mode: Serve built static files
+    // Production mode: Serve built static files + seeded avatar assets
     const distPath = path.resolve(__dirname, 'dist');
+    const assetsPath = path.resolve(__dirname, 'src/assets');
+    app.use('/src/assets', express.static(assetsPath));
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
+      // Keep API 404s as JSON
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'API route not found.' });
+      }
       res.sendFile(path.resolve(distPath, 'index.html'));
     });
     console.log('[SERVER] Production static files mounted from dist.');
   }
 
+  // Prefer Render's injected public URL when present
+  if (process.env.RENDER_EXTERNAL_URL && !process.env.APP_URL) {
+    process.env.APP_URL = process.env.RENDER_EXTERNAL_URL;
+  }
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`[PHONE-MAIL] Server listening on http://0.0.0.0:${PORT}`);
+    if (process.env.APP_URL || process.env.RENDER_EXTERNAL_URL) {
+      console.log(`[PHONE-MAIL] Public URL: ${process.env.APP_URL || process.env.RENDER_EXTERNAL_URL}`);
+    }
   });
 }
 
